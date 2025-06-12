@@ -354,9 +354,11 @@ class GitWorker(QThread):
                         error_msg += "\n" + "\n".join(operations)
                         return error_msg
                 else:
-                    operations.append("  ✓ Successfully committed changes")
+                    pass
+                    #operations.append("  ✓ Successfully committed changes")
             else:
-                operations.append(f"ℹ No uncommitted changes found in {repo_display}")
+                pass
+                #operations.append(f"ℹ No uncommitted changes found in {repo_display}")
             
             # Push changes
             operations.append("  → Running: git push")
