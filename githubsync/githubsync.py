@@ -300,12 +300,12 @@ class GitWorker(QThread):
         
         try:
             # Check for uncommitted changes
-            operations.append(f"🔍 Checking status of {repo_display}...")
+#            operations.append(f"🔍 Checking status of {repo_display}...")
             status_info = GitDiagnostics.check_uncommitted_changes(repo_path)
             
             # Debug: Show what we found
             if status_info['has_changes']:
-                operations.append(f"📝 Found changes in {repo_display}:")
+#                operations.append(f"📝 Found changes in {repo_display}:")
                 if status_info['untracked']:
                     operations.append(f"  • Untracked: {', '.join(status_info['untracked'][:3])}{'...' if len(status_info['untracked']) > 3 else ''}")
                 if status_info['modified']:
@@ -361,15 +361,15 @@ class GitWorker(QThread):
                 #operations.append(f"ℹ No uncommitted changes found in {repo_display}")
             
             # Push changes
-            operations.append("  → Running: git push")
+            #operations.append("  → Running: git push")
             result = self.execute_git_command(['git', 'push'], repo_path)
             
             # Debug: Show push result
-            operations.append(f"  → Push return code: {result.returncode}")
-            if result.stdout.strip():
-                operations.append(f"  → Push stdout: {result.stdout.strip()}")
-            if result.stderr.strip():
-                operations.append(f"  → Push stderr: {result.stderr.strip()}")
+            #operations.append(f"  → Push return code: {result.returncode}")
+            #if result.stdout.strip():
+            #    operations.append(f"  → Push stdout: {result.stdout.strip()}")
+            #if result.stderr.strip():
+            #    operations.append(f"  → Push stderr: {result.stderr.strip()}")
             
             if result.returncode == 0:
                 operations.append("  ✓ Successfully pushed to remote")
