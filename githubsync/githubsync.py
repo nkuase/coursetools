@@ -365,11 +365,11 @@ class GitWorker(QThread):
             result = self.execute_git_command(['git', 'push'], repo_path)
             
             # Debug: Show push result
-            #operations.append(f"  → Push return code: {result.returncode}")
-            #if result.stdout.strip():
-            #    operations.append(f"  → Push stdout: {result.stdout.strip()}")
-            #if result.stderr.strip():
-            #    operations.append(f"  → Push stderr: {result.stderr.strip()}")
+            operations.append(f"  → Push return code: {result.returncode}")
+            if result.stdout.strip():
+                operations.append(f"  → Push stdout: {result.stdout.strip()}")
+            if result.stderr.strip():
+                operations.append(f"  → Push stderr: {result.stderr.strip()}")
             
             if result.returncode == 0:
                 operations.append("  ✓ Successfully pushed to remote")
