@@ -1124,8 +1124,8 @@ class GitRepoManager(QMainWindow):
             self.show_error("No repositories found. Please scan for repositories first.")
             return
         
-        self.status_label.setText("Running health checks...")
-        self.status_label.setStyleSheet("color: #20B2AA; font-weight: bold;")
+#        self.status_label.setText("Running health checks...")
+#        self.status_label.setStyleSheet("color: #20B2AA; font-weight: bold;")
         
         health_report = []
         issues_found = 0
