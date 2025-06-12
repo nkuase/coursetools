@@ -1,4 +1,4 @@
 {
-  "base_directory": "/Users/smcho/github",
+  "base_directory": "$HOME/github",
   "description": "Base directory containing git repositories"
 }

@@ -9,6 +9,9 @@ This application demonstrates:
 - Process execution and management
 - Smart error analysis and auto-fix
 - Health checking and diagnostics
+- Portable configuration with environment variables
+- Automatic add/commit before push
+- Safe pull with uncommitted changes detection
 """
 
 import sys
@@ -17,6 +20,7 @@ import json
 import subprocess
 from pathlib import Path
 from typing import List, Dict
+from datetime import datetime
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
@@ -173,6 +177,60 @@ class GitDiagnostics:
         return health_info
     
     @staticmethod
+    def check_uncommitted_changes(repo_path: Path) -> Dict:
+        """Check for uncommitted changes in repository"""
+        status_info = {
+            'has_changes': False,
+            'files': [],
+            'staged': [],
+            'untracked': [],
+            'modified': []
+        }
+        
+        try:
+            result = subprocess.run(
+                ['git', 'status', '--porcelain'],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                status_info['has_changes'] = True
+                lines = result.stdout.strip().split('\n')
+                
+                for line in lines:
+                    if len(line) >= 3:
+                        staged_status = line[0]    # First character: staged status
+                        unstaged_status = line[1]  # Second character: unstaged status
+                        filename = line[3:]
+                        
+                        # Check for untracked files
+                        if staged_status == '?' and unstaged_status == '?':
+                            status_info['untracked'].append(filename)
+                            status_info['files'].append(filename)
+                        else:
+                            # Check staged changes
+                            if staged_status not in [' ', '?']:
+                                status_info['staged'].append(filename)
+                            
+                            # Check unstaged changes
+                            if unstaged_status not in [' ', '?']:
+                                status_info['modified'].append(filename)
+                            
+                            # Add to general files list
+                            if filename not in status_info['files']:
+                                status_info['files'].append(filename)
+            
+        except Exception as e:
+            # If we can't check, assume there might be changes for safety
+            status_info['has_changes'] = True
+            status_info['files'] = [f'Error checking status: {str(e)}']
+        
+        return status_info
+    
+    @staticmethod
     def auto_fix_repository(repo_path: Path, error_type: str, commands: List[str]) -> Dict:
         """Attempt to automatically fix common repository issues"""
         fix_result = {
@@ -226,6 +284,156 @@ class GitWorker(QThread):
         self.repositories = repositories
         self.operation = operation  # 'pull' or 'push'
     
+    def execute_git_command(self, cmd: List[str], repo_path: Path, timeout: int = 30) -> subprocess.CompletedProcess:
+        """Execute a git command and return the result"""
+        return subprocess.run(
+            cmd,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+    
+    def perform_push_operation(self, repo_path: Path, repo_display: str) -> str:
+        """Perform push operation with automatic add and commit"""
+        operations = []
+        
+        try:
+            # Check for uncommitted changes
+            operations.append(f"🔍 Checking status of {repo_display}...")
+            status_info = GitDiagnostics.check_uncommitted_changes(repo_path)
+            
+            # Debug: Show what we found
+            if status_info['has_changes']:
+                operations.append(f"📝 Found changes in {repo_display}:")
+                if status_info['untracked']:
+                    operations.append(f"  • Untracked: {', '.join(status_info['untracked'][:3])}{'...' if len(status_info['untracked']) > 3 else ''}")
+                if status_info['modified']:
+                    operations.append(f"  • Modified: {', '.join(status_info['modified'][:3])}{'...' if len(status_info['modified']) > 3 else ''}")
+                if status_info['staged']:
+                    operations.append(f"  • Staged: {', '.join(status_info['staged'][:3])}{'...' if len(status_info['staged']) > 3 else ''}")
+                
+                # Add all changes
+                operations.append("  → Running: git add .")
+                result = self.execute_git_command(['git', 'add', '.'], repo_path)
+                if result.returncode != 0:
+                    error_msg = f"✗ {repo_display}: git add failed"
+                    if result.stderr.strip():
+                        error_msg += f"\n  Error: {result.stderr.strip()}"
+                    if result.stdout.strip():
+                        error_msg += f"\n  Output: {result.stdout.strip()}"
+                    error_msg += "\n" + "\n".join(operations)
+                    return error_msg
+                operations.append("  ✓ Successfully added all changes")
+                
+                # Commit changes
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                commit_msg = f"Auto-commit before push - {timestamp}"
+                operations.append(f"  → Running: git commit -m '{commit_msg}'")
+                
+                result = self.execute_git_command(['git', 'commit', '-m', commit_msg], repo_path)
+                
+                # Debug: Show commit result
+                operations.append(f"  → Commit return code: {result.returncode}")
+                if result.stdout.strip():
+                    operations.append(f"  → Commit stdout: {result.stdout.strip()}")
+                if result.stderr.strip():
+                    operations.append(f"  → Commit stderr: {result.stderr.strip()}")
+                
+                if result.returncode != 0:
+                    # Check if it's because there's nothing to commit
+                    output_text = (result.stdout + " " + result.stderr).lower()
+                    if "nothing to commit" in output_text or "nothing added to commit" in output_text:
+                        operations.append("  ℹ Nothing new to commit (working tree clean)")
+                    else:
+                        error_msg = f"✗ {repo_display}: git commit failed"
+                        if result.stderr.strip():
+                            error_msg += f"\n  Error: {result.stderr.strip()}"
+                        if result.stdout.strip():
+                            error_msg += f"\n  Output: {result.stdout.strip()}"
+                        error_msg += "\n" + "\n".join(operations)
+                        return error_msg
+                else:
+                    operations.append("  ✓ Successfully committed changes")
+            else:
+                operations.append(f"ℹ No uncommitted changes found in {repo_display}")
+            
+            # Push changes
+            operations.append("  → Running: git push")
+            result = self.execute_git_command(['git', 'push'], repo_path)
+            
+            # Debug: Show push result
+            operations.append(f"  → Push return code: {result.returncode}")
+            if result.stdout.strip():
+                operations.append(f"  → Push stdout: {result.stdout.strip()}")
+            if result.stderr.strip():
+                operations.append(f"  → Push stderr: {result.stderr.strip()}")
+            
+            if result.returncode == 0:
+                operations.append("  ✓ Successfully pushed to remote")
+                success_msg = f"✓ {repo_display}: push completed successfully"
+                
+                # Show meaningful push output
+                if result.stdout.strip():
+                    output = result.stdout.strip()
+                    if not any(phrase in output.lower() for phrase in ['up-to-date', 'up to date']):
+                        operations.append(f"  📤 Push details: {output}")
+                
+                return success_msg + "\n" + "\n".join(operations)
+            else:
+                error_msg = f"✗ {repo_display}: git push failed"
+                if result.stderr.strip():
+                    error_msg += f"\n  Error: {result.stderr.strip()}"
+                if result.stdout.strip():
+                    error_msg += f"\n  Output: {result.stdout.strip()}"
+                error_msg += "\n" + "\n".join(operations)
+                return error_msg
+                
+        except Exception as e:
+            error_msg = f"✗ {repo_display}: Push operation failed - {str(e)}"
+            if operations:
+                error_msg += "\n" + "\n".join(operations)
+            return error_msg
+    
+    def perform_pull_operation(self, repo_path: Path, repo_display: str) -> str:
+        """Perform pull operation with uncommitted changes check"""
+        try:
+            # Check for uncommitted changes first
+            status_info = GitDiagnostics.check_uncommitted_changes(repo_path)
+            
+            if status_info['has_changes']:
+                # Skip pull and report uncommitted changes
+                files_list = status_info['files'][:5]  # Show first 5 files
+                files_display = ", ".join(files_list)
+                if len(status_info['files']) > 5:
+                    files_display += f" (and {len(status_info['files']) - 5} more)"
+                
+                skip_msg = f"⚠ {repo_display}: SKIPPED pull - uncommitted changes detected"
+                skip_msg += f"\n  Uncommitted files: {files_display}"
+                skip_msg += f"\n  → Commit or stash changes before pulling"
+                return skip_msg
+            
+            # Proceed with pull since working directory is clean
+            result = self.execute_git_command(['git', 'pull'], repo_path)
+            
+            if result.returncode == 0:
+                success_msg = f"✓ {repo_display}: pull successful"
+                if result.stdout.strip():
+                    output = result.stdout.strip()
+                    if not any(phrase in output.lower() for phrase in ['already up to date', 'up-to-date']):
+                        success_msg += f"\n  Output: {output}"
+                    else:
+                        success_msg += "\n  Repository already up to date"
+                return success_msg
+            else:
+                error_msg = f"✗ {repo_display}: pull failed"
+                if result.stderr.strip():
+                    error_msg += f"\n  Error: {result.stderr.strip()}"
+                return error_msg
+                
+        except Exception as e:
+            return f"✗ {repo_display}: Pull operation failed - {str(e)}"
+    
     def run(self):
         """Execute git operations on all repositories"""
         total_repos = len(self.repositories)
@@ -241,54 +449,55 @@ class GitWorker(QThread):
                 
                 self.progress.emit(progress_msg)
                 
-                # Perform health check before operation
-                health_info = GitDiagnostics.check_repository_health(repo_path)
-                
-                # Execute git command
-                if self.operation == 'pull':
-                    cmd = ['git', 'pull']
-                elif self.operation == 'push':
-                    cmd = ['git', 'push']
-                else:
-                    raise ValueError(f"Unknown operation: {self.operation}")
-                
-                # Run the git command
-                result = subprocess.run(
-                    cmd,
-                    cwd=repo_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=30  # 30 second timeout
-                )
-                
                 # Format repository name for results (show relative path if nested)
                 repo_display = str(repo_path.name)
                 if len(repo_path.parts) > 2:
                     repo_display = "/".join(repo_path.parts[-2:])
                 
-                if result.returncode == 0:
-                    success_msg = f"✓ {repo_display}: {self.operation} successful"
-                    if result.stdout.strip():
-                        # Only show meaningful output (skip "Already up to date" etc.)
-                        output = result.stdout.strip()
-                        if not any(phrase in output.lower() for phrase in ['already up to date', 'up-to-date']):
-                            success_msg += f"\n  Output: {output}"
+                # Perform health check before operation
+                health_info = GitDiagnostics.check_repository_health(repo_path)
+                
+                if not health_info['healthy']:
+                    error_msg = f"✗ {repo_display}: Repository health check failed"
+                    error_msg += f"\n  Issues: {', '.join(health_info['issues'])}"
                     
+                    error_info = {
+                        'repo_path': repo_path,
+                        'repo_display': repo_display,
+                        'analysis': {
+                            'type': 'health_check_failed',
+                            'description': f'Repository health issues: {", ".join(health_info["issues"])}',
+                            'fix_available': False,
+                            'fix_description': 'Fix repository issues manually',
+                            'commands': []
+                        },
+                        'health': health_info
+                    }
+                    self.error_output.emit(error_msg, error_info)
+                    continue
+                
+                # Execute operation based on type
+                if self.operation == 'pull':
+                    result_msg = self.perform_pull_operation(repo_path, repo_display)
+                elif self.operation == 'push':
+                    result_msg = self.perform_push_operation(repo_path, repo_display)
+                else:
+                    raise ValueError(f"Unknown operation: {self.operation}")
+                
+                # Determine if it's success, warning, or error
+                if result_msg.startswith('✓'):
                     # Add health warnings if any
                     if health_info['warnings']:
-                        success_msg += f"\n  ⚠ Warnings: {', '.join(health_info['warnings'])}"
-                    
-                    self.success_output.emit(success_msg)
+                        result_msg += f"\n  ⚠ Warnings: {', '.join(health_info['warnings'])}"
+                    self.success_output.emit(result_msg)
+                elif result_msg.startswith('⚠'):
+                    # This is a warning (like skipped pull), treat as success but with warning
+                    self.success_output.emit(result_msg)
                 else:
-                    # Analyze the error and provide fix suggestions
-                    error_text = result.stderr.strip() if result.stderr.strip() else result.stdout.strip()
+                    # This is an error, analyze it
+                    error_text = result_msg
                     error_analysis = GitDiagnostics.analyze_error(error_text, repo_path)
                     
-                    error_msg = f"✗ {repo_display}: {self.operation} failed"
-                    if error_text:
-                        error_msg += f"\n  Error: {error_text}"
-                    
-                    # Add diagnostic information
                     error_info = {
                         'repo_path': repo_path,
                         'repo_display': repo_display,
@@ -296,7 +505,7 @@ class GitWorker(QThread):
                         'health': health_info
                     }
                     
-                    self.error_output.emit(error_msg, error_info)
+                    self.error_output.emit(error_text, error_info)
                         
             except subprocess.TimeoutExpired:
                 repo_display = str(repo_path.name)
@@ -469,7 +678,9 @@ class GitRepoManager(QMainWindow):
         super().__init__()
         self.repositories: List[Path] = []
         self.worker = None
-        self.config_file = "git_manager_config.json"
+        # Config file in same directory as script
+        script_dir = Path(__file__).parent
+        self.config_file = script_dir / "git_manager_config.json"
         self.error_widgets = []  # Store error fix widgets
         
         self.init_ui()
@@ -521,15 +732,15 @@ class GitRepoManager(QMainWindow):
         
         layout.addWidget(repo_group)
         
-        # Action buttons
+        # Action buttons with enhanced descriptions
         button_layout = QHBoxLayout()
         
-        self.pull_button = QPushButton("Pull All Repositories")
+        self.pull_button = QPushButton("Pull All Repositories\n(Safe: skips repos with uncommitted changes)")
         self.pull_button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         self.pull_button.clicked.connect(self.pull_all)
         button_layout.addWidget(self.pull_button)
         
-        self.push_button = QPushButton("Push All Repositories")
+        self.push_button = QPushButton("Push All Repositories\n(Auto: add → commit → push)")
         self.push_button.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
         self.push_button.clicked.connect(self.push_all)
         button_layout.addWidget(self.push_button)
@@ -549,7 +760,7 @@ class GitRepoManager(QMainWindow):
         output_splitter = QSplitter(Qt.Orientation.Horizontal)
         
         # Success output (left side)
-        success_group = QGroupBox("Successful Operations")
+        success_group = QGroupBox("Successful Operations & Warnings")
         success_group.setStyleSheet("QGroupBox::title { color: green; font-weight: bold; }")
         success_layout = QVBoxLayout(success_group)
         
@@ -618,17 +829,55 @@ class GitRepoManager(QMainWindow):
         
         layout.addWidget(output_splitter)
     
-    def load_configuration(self):
-        """Load configuration from JSON file"""
+    def expand_environment_variables(self, path_str: str) -> str:
+        """Expand environment variables in path string"""
+        if not path_str:
+            return path_str
+        
+        # Expand environment variables like $HOME, $USER, etc.
+        expanded = os.path.expandvars(path_str)
+        
+        # Also expand ~ to home directory
+        expanded = os.path.expanduser(expanded)
+        
+        return expanded
+    
+    def get_portable_path(self, absolute_path: str) -> str:
+        """Convert absolute path to portable format using environment variables"""
+        if not absolute_path:
+            return absolute_path
+        
+        path = Path(absolute_path)
+        home_dir = Path.home()
+        
         try:
-            if os.path.exists(self.config_file):
+            # If path is under home directory, use $HOME
+            relative_to_home = path.relative_to(home_dir)
+            return f"$HOME/{relative_to_home}"
+        except ValueError:
+            # Path is not under home directory, return as-is
+            return absolute_path
+    
+    def load_configuration(self):
+        """Load configuration from JSON file with environment variable support"""
+        try:
+            if self.config_file.exists():
                 with open(self.config_file, 'r') as f:
                     config = json.load(f)
-                    base_dir = config.get('base_directory', '')
-                    if base_dir and os.path.exists(base_dir):
-                        self.config_label.setText(f"Directory: {base_dir}")
-                        self.config_label.setStyleSheet("color: green;")
-                        return
+                    base_dir_raw = config.get('base_directory', '')
+                    
+                    if base_dir_raw:
+                        # Expand environment variables
+                        base_dir = self.expand_environment_variables(base_dir_raw)
+                        
+                        if os.path.exists(base_dir):
+                            self.config_label.setText(f"Directory: {base_dir}")
+                            self.config_label.setStyleSheet("color: green;")
+                            return
+                        else:
+                            self.config_label.setText(f"Directory not found: {base_dir}")
+                            self.config_label.setStyleSheet("color: orange;")
+                            return
             
             # If no valid config, create default
             self.create_default_config()
@@ -638,32 +887,55 @@ class GitRepoManager(QMainWindow):
             self.create_default_config()
     
     def create_default_config(self):
-        """Create a default configuration file"""
+        """Create a default configuration file with portable paths"""
+        # Use $HOME/git-repositories as default (portable across systems)
         default_config = {
-            "base_directory": "",
-            "description": "Set base_directory to the path containing your git repositories"
+            "base_directory": "$HOME/git-repositories",
+            "description": "Base directory containing git repositories. Use $HOME, $USER, etc. for portability across systems.",
+            "examples": {
+                "home_projects": "$HOME/projects", 
+                "user_documents": "$HOME/Documents/git-repos",
+                "custom_path": "/absolute/path/to/repos"
+            }
         }
         
         try:
             with open(self.config_file, 'w') as f:
                 json.dump(default_config, f, indent=2)
-            self.config_label.setText("Please configure base directory")
-            self.config_label.setStyleSheet("color: red;")
+            
+            # Check if default directory exists
+            expanded_default = self.expand_environment_variables(default_config["base_directory"])
+            if os.path.exists(expanded_default):
+                self.config_label.setText(f"Using default: {expanded_default}")
+                self.config_label.setStyleSheet("color: green;")
+            else:
+                self.config_label.setText("Please configure base directory (default path doesn't exist)")
+                self.config_label.setStyleSheet("color: red;")
+                
         except Exception as e:
             self.show_error(f"Error creating configuration file: {str(e)}")
     
     def browse_directory(self):
-        """Open dialog to select base directory"""
+        """Open dialog to select base directory and save in portable format"""
         directory = QFileDialog.getExistingDirectory(
             self, 
             "Select Directory Containing Git Repositories"
         )
         
         if directory:
-            # Update configuration
+            # Convert to portable path using environment variables when possible
+            portable_path = self.get_portable_path(directory)
+            
+            # Update configuration with portable path
             config = {
-                "base_directory": directory,
-                "description": "Base directory containing git repositories"
+                "base_directory": portable_path,
+                "description": "Base directory containing git repositories. Use $HOME, $USER, etc. for portability across systems.",
+                "expanded_path": directory,  # Store expanded path for reference
+                "examples": {
+                    "home_projects": "$HOME/projects", 
+                    "user_documents": "$HOME/Documents/git-repos",
+                    "custom_path": "/absolute/path/to/repos"
+                }
             }
             
             try:
@@ -671,6 +943,8 @@ class GitRepoManager(QMainWindow):
                     json.dump(config, f, indent=2)
                 
                 self.config_label.setText(f"Directory: {directory}")
+                if portable_path != directory:
+                    self.config_label.setText(f"Directory: {directory}\n(Saved as: {portable_path})")
                 self.config_label.setStyleSheet("color: green;")
                 
                 # Refresh repository list
@@ -683,16 +957,23 @@ class GitRepoManager(QMainWindow):
         """Recursively scan base directory for git repositories at any depth"""
         try:
             # Load current configuration
-            if not os.path.exists(self.config_file):
+            if not self.config_file.exists():
                 self.repo_list.setText("No configuration file found. Please browse for a directory.")
                 return
             
             with open(self.config_file, 'r') as f:
                 config = json.load(f)
-                base_dir = config.get('base_directory', '')
+                base_dir_raw = config.get('base_directory', '')
             
-            if not base_dir or not os.path.exists(base_dir):
-                self.repo_list.setText("Invalid base directory. Please configure a valid directory.")
+            if not base_dir_raw:
+                self.repo_list.setText("No base directory configured. Please browse for a directory.")
+                return
+            
+            # Expand environment variables
+            base_dir = self.expand_environment_variables(base_dir_raw)
+            
+            if not os.path.exists(base_dir):
+                self.repo_list.setText(f"Base directory does not exist: {base_dir}\n(From config: {base_dir_raw})")
                 return
             
             # Find all git repositories recursively
@@ -725,7 +1006,13 @@ class GitRepoManager(QMainWindow):
                         repo_display.append(f"• {repo.name}")
                 
                 self.repo_list.setText('\n'.join(repo_display))
-                self.status_label.setText(f"Found {len(self.repositories)} git repositories")
+                
+                # Show config info in status
+                config_info = f"Found {len(self.repositories)} git repositories"
+                if base_dir_raw != base_dir:
+                    config_info += f" (expanded from {base_dir_raw})"
+                
+                self.status_label.setText(config_info)
                 self.status_label.setStyleSheet("")  # Reset any previous styling
                 
                 # Enable buttons
@@ -743,11 +1030,11 @@ class GitRepoManager(QMainWindow):
             self.show_error(f"Error scanning repositories: {str(e)}")
     
     def pull_all(self):
-        """Pull changes from all repositories"""
+        """Pull changes from all repositories (safe mode)"""
         self.execute_git_operation('pull')
     
     def push_all(self):
-        """Push changes to all repositories"""
+        """Push changes to all repositories (with auto add/commit)"""
         self.execute_git_operation('push')
     
     def execute_git_operation(self, operation: str):
@@ -764,7 +1051,9 @@ class GitRepoManager(QMainWindow):
         # Show progress
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Indeterminate progress
-        self.status_label.setText(f"Executing {operation} operation...")
+        
+        operation_desc = "pull (safe mode)" if operation == 'pull' else "push (auto add/commit)"
+        self.status_label.setText(f"Executing {operation_desc} operation...")
         self.status_label.setStyleSheet("")  # Reset any previous styling
         
         # Clear previous output
@@ -878,14 +1167,22 @@ class GitRepoManager(QMainWindow):
         
         # Update status with summary
         success_count = self.success_text.toPlainText().count('✓')
+        warning_count = self.success_text.toPlainText().count('⚠')
         error_count = self.error_text.toPlainText().count('✗')
         fixable_errors = len(self.error_widgets)
         
         if error_count == 0:
-            self.status_label.setText(f"✅ Operation completed successfully! ({success_count} repositories)")
-            self.status_label.setStyleSheet("color: green; font-weight: bold;")
+            if warning_count > 0:
+                self.status_label.setText(f"✅ Operation completed! ({success_count} successful, {warning_count} warnings)")
+                self.status_label.setStyleSheet("color: green; font-weight: bold;")
+            else:
+                self.status_label.setText(f"✅ Operation completed successfully! ({success_count} repositories)")
+                self.status_label.setStyleSheet("color: green; font-weight: bold;")
         else:
-            status_msg = f"⚠️ Completed: {success_count} successful, {error_count} errors"
+            status_msg = f"⚠️ Completed: {success_count} successful"
+            if warning_count > 0:
+                status_msg += f", {warning_count} warnings"
+            status_msg += f", {error_count} errors"
             if fixable_errors > 0:
                 status_msg += f" ({fixable_errors} auto-fixable)"
             self.status_label.setText(status_msg)
