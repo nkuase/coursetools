@@ -253,6 +253,93 @@ class GitDiagnostics:
         }
         
         try:
+            # Special handling for non-fast-forward errors
+            if error_type == 'non_fast_forward':
+                # First, let's check the current status
+                fix_result['output'].append("=== Checking repository status ===")
+                
+                status_result = subprocess.run(
+                    ['git', 'status', '--porcelain'],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if status_result.stdout.strip():
+                    fix_result['output'].append(f"Found uncommitted changes: {status_result.stdout.strip()}")
+                    # If there are uncommitted changes, stash them first
+                    fix_result['output'].append("$ git stash push -m 'Auto-stash before pull-rebase'")
+                    stash_result = subprocess.run(
+                        ['git', 'stash', 'push', '-m', 'Auto-stash before pull-rebase'],
+                        cwd=repo_path,
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    if stash_result.stdout.strip():
+                        fix_result['output'].append(stash_result.stdout.strip())
+                else:
+                    fix_result['output'].append("Working directory is clean")
+                
+                # Now execute the pull --rebase
+                fix_result['output'].append("$ git pull --rebase")
+                pull_result = subprocess.run(
+                    ['git', 'pull', '--rebase'],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=60  # Give more time for rebase
+                )
+                
+                if pull_result.stdout.strip():
+                    fix_result['output'].append(pull_result.stdout.strip())
+                if pull_result.stderr.strip():
+                    fix_result['output'].append(f"Pull stderr: {pull_result.stderr.strip()}")
+                
+                if pull_result.returncode != 0:
+                    fix_result['message'] = f"Auto-fix failed during git pull --rebase"
+                    return fix_result
+                
+                # If we stashed changes, restore them
+                if status_result.stdout.strip():
+                    fix_result['output'].append("$ git stash pop")
+                    pop_result = subprocess.run(
+                        ['git', 'stash', 'pop'],
+                        cwd=repo_path,
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    if pop_result.stdout.strip():
+                        fix_result['output'].append(pop_result.stdout.strip())
+                    if pop_result.returncode != 0:
+                        fix_result['output'].append("Warning: Could not restore stashed changes automatically")
+                
+                # Now try to push
+                fix_result['output'].append("$ git push")
+                push_result = subprocess.run(
+                    ['git', 'push'],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                
+                if push_result.stdout.strip():
+                    fix_result['output'].append(push_result.stdout.strip())
+                if push_result.stderr.strip():
+                    fix_result['output'].append(f"Push stderr: {push_result.stderr.strip()}")
+                
+                if push_result.returncode == 0:
+                    fix_result['success'] = True
+                    fix_result['message'] = "Successfully resolved non-fast-forward error and pushed changes"
+                else:
+                    fix_result['message'] = f"Pull --rebase succeeded but push still failed"
+                
+                return fix_result
+            
+            # Default handling for other error types
             for cmd in commands:
                 cmd_parts = cmd.split()
                 result = subprocess.run(
@@ -606,6 +693,13 @@ class ErrorFixWidget(QWidget):
                 auto_fix_btn.clicked.connect(self.perform_auto_fix)
                 button_layout.addWidget(auto_fix_btn)
                 
+                # Special handling for non-fast-forward errors
+                if analysis['type'] == 'non_fast_forward':
+                    force_fix_btn = QPushButton("⚡ Force Fix")
+                    force_fix_btn.setStyleSheet("background-color: #FF6347; color: white; font-weight: bold;")
+                    force_fix_btn.clicked.connect(self.perform_force_fix)
+                    button_layout.addWidget(force_fix_btn)
+                
                 manual_btn = QPushButton("📋 Show Commands")
                 manual_btn.setStyleSheet("background-color: #4682B4; color: white;")
                 manual_btn.clicked.connect(self.show_manual_commands)
@@ -643,6 +737,84 @@ class ErrorFixWidget(QWidget):
         """Request retry of the operation for this repository"""
         repo_path = str(self.error_info['repo_path'])
         self.retry_requested.emit(repo_path)
+    
+    def perform_force_fix(self):
+        """Perform aggressive fix for non-fast-forward errors"""
+        analysis = self.error_info['analysis']
+        repo_path = self.error_info['repo_path']
+        
+        # Show warning dialog
+        reply = QMessageBox.warning(
+            self, 
+            "Force Fix Warning",
+            f"This will perform an aggressive fix for the non-fast-forward error:\n\n"
+            f"1. Fetch latest changes from remote\n"
+            f"2. Reset local branch to match remote (losing local commits)\n"
+            f"3. Force push if needed\n\n"
+            f"⚠️ WARNING: This may lose local commits!\n\n"
+            f"Are you sure you want to continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                # Get current branch name first
+                branch_result = subprocess.run(
+                    ['git', 'branch', '--show-current'],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                if branch_result.returncode != 0:
+                    QMessageBox.critical(self, "Error", "Could not determine current branch")
+                    return
+                
+                current_branch = branch_result.stdout.strip()
+                if not current_branch:
+                    QMessageBox.critical(self, "Error", "Repository appears to be in detached HEAD state")
+                    return
+                
+                # Execute force fix commands
+                force_commands = [
+                    'git fetch origin',
+                    f'git reset --hard origin/{current_branch}'
+                ]
+                
+                fix_result = GitDiagnostics.auto_fix_repository(
+                    repo_path, 
+                    'force_fix', 
+                    force_commands
+                )
+                
+                if fix_result['success']:
+                    QMessageBox.information(
+                        self,
+                        "Force Fix Successful",
+                        f"✅ {fix_result['message']}\n\nOutput:\n" + "\n".join(fix_result['output'][:10])
+                    )
+                    # Update button to show success
+                    sender = self.sender()
+                    sender.setText("✅ Force Fixed")
+                    sender.setEnabled(False)
+                    sender.setStyleSheet("background-color: #228B22; color: white;")
+                    
+                    # Auto-retry the operation
+                    self.retry_operation()
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "Force Fix Failed",
+                        f"❌ {fix_result['message']}\n\nOutput:\n" + "\n".join(fix_result['output'][:10])
+                    )
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Force Fix Error",
+                    f"Error during force fix: {str(e)}"
+                )
     
     def perform_auto_fix(self):
         """Attempt to automatically fix the repository issue"""
