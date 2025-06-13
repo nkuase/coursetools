@@ -1,7 +1,7 @@
 import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
                             QWidget, QPushButton, QTextEdit, QLabel, QSpinBox,
-                            QMessageBox, QSplitter, QGroupBox)
+                            QMessageBox, QSplitter, QGroupBox, QCheckBox)
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 import re
@@ -35,7 +35,7 @@ class CodeSplitterApp(QMainWindow):
         layout.addLayout(button_layout)
         
         # Status
-        self.status_label = QLabel("Ready - Copy code to clipboard and click 'Read & Split' or 'Join Columns Back'")
+        self.status_label = QLabel("Ready - Copy code to clipboard and click 'Read & Split' (with optional line numbers) or 'Join Columns Back'")
         self.status_label.setStyleSheet("color: blue; padding: 5px;")
         layout.addWidget(self.status_label)
         
@@ -45,9 +45,16 @@ class CodeSplitterApp(QMainWindow):
         
         layout.addWidget(QLabel("Number of columns:"))
         self.columns_spinbox = QSpinBox()
-        self.columns_spinbox.setRange(2, 4)
+        self.columns_spinbox.setRange(1, 4)  # Allow 1 column for line numbers only
         self.columns_spinbox.setValue(2)
         layout.addWidget(self.columns_spinbox)
+        
+        layout.addWidget(QLabel("   "))  # Spacer
+        
+        # Add line numbers checkbox
+        self.line_numbers_checkbox = QCheckBox("Add line numbers")
+        self.line_numbers_checkbox.setChecked(False)
+        layout.addWidget(self.line_numbers_checkbox)
         
         layout.addStretch()
         
@@ -62,7 +69,9 @@ class CodeSplitterApp(QMainWindow):
         self.original_text = QTextEdit()
         # Use platform-appropriate monospace font
         monospace_font = QFont()
-        monospace_font.setFamily("monospace")  # Generic monospace
+        # Try common monospace fonts for each platform
+        font_families = ["SF Mono", "Monaco", "Menlo", "Consolas", "DejaVu Sans Mono", "Liberation Mono", "Courier New"]
+        monospace_font.setFamilies(font_families)
         monospace_font.setPointSize(10)
         monospace_font.setStyleHint(QFont.StyleHint.Monospace)
         
@@ -76,7 +85,9 @@ class CodeSplitterApp(QMainWindow):
         self.split_text = QTextEdit()
         # Use platform-appropriate monospace font
         monospace_font = QFont()
-        monospace_font.setFamily("monospace")  # Generic monospace
+        # Try common monospace fonts for each platform
+        font_families = ["SF Mono", "Monaco", "Menlo", "Consolas", "DejaVu Sans Mono", "Liberation Mono", "Courier New"]
+        monospace_font.setFamilies(font_families)
         monospace_font.setPointSize(10)
         monospace_font.setStyleHint(QFont.StyleHint.Monospace)
         
@@ -126,8 +137,16 @@ class CodeSplitterApp(QMainWindow):
             # Display original code
             self.original_text.setPlainText(code)
             
+            # Get current settings
+            num_columns = self.columns_spinbox.value()
+            add_line_numbers = self.line_numbers_checkbox.isChecked()
+            
             # Split the code
-            split_result = self.split_code_into_columns(code, self.columns_spinbox.value())
+            split_result = self.split_code_into_columns(
+                code, 
+                num_columns,
+                add_line_numbers
+            )
             
             # Display split result
             self.split_text.setPlainText(split_result)
@@ -136,7 +155,13 @@ class CodeSplitterApp(QMainWindow):
             self.copy_result_btn.setEnabled(True)
             self.join_columns_btn.setEnabled(False)  # Disable join since we just split
             
-            self.status_label.setText(f"✅ Code split into {self.columns_spinbox.value()} columns successfully!")
+            if num_columns == 1:
+                if add_line_numbers:
+                    self.status_label.setText("✅ Line numbers added successfully!")
+                else:
+                    self.status_label.setText("✅ Code formatted (1 column)!")
+            else:
+                self.status_label.setText(f"✅ Code split into {num_columns} columns successfully!")
             self.status_label.setStyleSheet("color: green; padding: 5px;")
             
         except Exception as e:
@@ -152,9 +177,12 @@ class CodeSplitterApp(QMainWindow):
                 self.show_message("Clipboard is empty or contains no text!")
                 return
                 
-            # Check if code contains | separators
-            if '|' not in code:
-                self.show_message("No column separators (|) found in clipboard text!")
+            # Check if code contains | separators or line numbers
+            has_separators = '|' in code
+            has_line_numbers = any(re.match(r'^\s*\d+:\s*', line) for line in code.split('\n'))
+            
+            if not has_separators and not has_line_numbers:
+                self.show_message("No column separators (|) or line numbers found in clipboard text!")
                 return
                 
             # Display original split code
@@ -186,6 +214,22 @@ class CodeSplitterApp(QMainWindow):
             
         if not lines:
             return "No code to join"
+        
+        # Check if this is a single column with potential line numbers
+        if '|' not in split_code:
+            # Single column - just remove line numbers if present
+            result_lines = []
+            for line in lines:
+                # Check if line starts with line number pattern (e.g., "1: ", "12: ")
+                import re
+                line_num_pattern = r'^\s*\d+:\s*'
+                if re.match(line_num_pattern, line):
+                    # Remove the line number
+                    cleaned_line = re.sub(line_num_pattern, '', line)
+                    result_lines.append(cleaned_line)
+                else:
+                    result_lines.append(line)
+            return "\n".join(result_lines)
             
         # Split each line by | and collect columns
         all_columns = []
@@ -211,12 +255,18 @@ class CodeSplitterApp(QMainWindow):
         for col_idx in range(max_columns):
             for row in all_columns:
                 if col_idx < len(row) and row[col_idx].strip():
-                    result_lines.append(row[col_idx])
+                    line = row[col_idx]
+                    # Remove line numbers if present
+                    import re
+                    line_num_pattern = r'^\s*\d+:\s*'
+                    if re.match(line_num_pattern, line):
+                        line = re.sub(line_num_pattern, '', line)
+                    result_lines.append(line)
                     
         return "\n".join(result_lines)
             
-    def split_code_into_columns(self, code, num_columns):
-        """Split code into specified number of columns"""
+    def split_code_into_columns(self, code, num_columns, add_line_numbers=False):
+        """Split code into specified number of columns with optional line numbers"""
         # Clean and split into lines
         lines = code.replace('\r\n', '\n').replace('\r', '\n').split('\n')
         
@@ -226,6 +276,23 @@ class CodeSplitterApp(QMainWindow):
             
         if not lines:
             return "No code to split"
+        
+        # Add line numbers if requested
+        if add_line_numbers:
+            # Calculate the width needed for line numbers
+            max_line_num = len(lines)
+            line_num_width = len(str(max_line_num))
+            
+            # Add line numbers to each line
+            numbered_lines = []
+            for i, line in enumerate(lines, 1):
+                line_num = str(i).rjust(line_num_width)
+                numbered_lines.append(f"{line_num}: {line}")
+            lines = numbered_lines
+        
+        # If only 1 column requested, just return the lines with optional line numbers
+        if num_columns == 1:
+            return "\n".join(lines)
             
         # Calculate lines per column
         total_lines = len(lines)
@@ -297,8 +364,11 @@ class CodeSplitterApp(QMainWindow):
             clipboard = QApplication.clipboard()
             clipboard.setText(result_text)
             
-            # Enable join button only if result contains | separators
-            if '|' in result_text:
+            # Enable join button only if result contains | separators or line numbers
+            has_separators = '|' in result_text
+            has_line_numbers = any(re.match(r'^\s*\d+:\s*', line) for line in result_text.split('\n'))
+            
+            if has_separators or has_line_numbers:
                 self.join_columns_btn.setEnabled(True)
             else:
                 self.join_columns_btn.setEnabled(False)
@@ -314,7 +384,7 @@ class CodeSplitterApp(QMainWindow):
         msg_box = QMessageBox()
         msg_box.setWindowTitle("Code Splitter")
         msg_box.setText(message)
-        msg_box.exec_()
+        msg_box.exec()  # PyQt6 uses exec() instead of exec_()
         
         self.status_label.setText(message)
         self.status_label.setStyleSheet("color: red; padding: 5px;")
