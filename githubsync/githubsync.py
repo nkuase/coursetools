@@ -51,8 +51,21 @@ class GitDiagnostics:
         
         error_lower = error_message.lower()
         
+        # Non-fast-forward push error (local behind remote)
+        if "non-fast-forward" in error_lower or "tip of your current branch is behind" in error_lower:
+            error_info = {
+                'type': 'non_fast_forward',
+                'description': 'Local branch is behind remote - need to pull first',
+                'fix_available': True,
+                'fix_description': 'Pull remote changes, then push again',
+                'commands': [
+                    'git pull --rebase',
+                    'git push'
+                ]
+            }
+        
         # Branch mismatch (master -> main)
-        if "no such ref was fetched" in error_lower and "master" in error_lower:
+        elif "no such ref was fetched" in error_lower and "master" in error_lower:
             error_info = {
                 'type': 'branch_mismatch',
                 'description': 'Local branch tracking old branch name (master vs main)',
@@ -74,7 +87,7 @@ class GitDiagnostics:
                 'fix_description': 'Fetch and merge remote changes',
                 'commands': [
                     'git fetch origin',
-                    'git merge origin/main || git merge origin/master'
+                    'git pull --rebase'
                 ]
             }
         
@@ -300,12 +313,12 @@ class GitWorker(QThread):
         
         try:
             # Check for uncommitted changes
-#            operations.append(f"🔍 Checking status of {repo_display}...")
+            operations.append(f"🔍 Checking status of {repo_display}...")
             status_info = GitDiagnostics.check_uncommitted_changes(repo_path)
             
             # Debug: Show what we found
             if status_info['has_changes']:
-#                operations.append(f"📝 Found changes in {repo_display}:")
+                operations.append(f"📝 Found changes in {repo_display}:")
                 if status_info['untracked']:
                     operations.append(f"  • Untracked: {', '.join(status_info['untracked'][:3])}{'...' if len(status_info['untracked']) > 3 else ''}")
                 if status_info['modified']:
@@ -354,14 +367,12 @@ class GitWorker(QThread):
                         error_msg += "\n" + "\n".join(operations)
                         return error_msg
                 else:
-                    pass
-                    #operations.append("  ✓ Successfully committed changes")
+                    operations.append("  ✓ Successfully committed changes")
             else:
-                pass
-                #operations.append(f"ℹ No uncommitted changes found in {repo_display}")
+                operations.append(f"ℹ No uncommitted changes found in {repo_display}")
             
             # Push changes
-            #operations.append("  → Running: git push")
+            operations.append("  → Running: git push")
             result = self.execute_git_command(['git', 'push'], repo_path)
             
             # Debug: Show push result
@@ -556,6 +567,8 @@ class ErrorFixWidget(QWidget):
     Widget for displaying error analysis and auto-fix options
     """
     
+    retry_requested = pyqtSignal(str)  # Signal for retry request
+    
     def __init__(self, error_info: Dict, parent=None):
         super().__init__(parent)
         self.error_info = error_info
@@ -585,7 +598,7 @@ class ErrorFixWidget(QWidget):
                 fix_label.setWordWrap(True)
                 layout.addWidget(fix_label)
                 
-                # Auto-fix button
+                # Auto-fix buttons
                 button_layout = QHBoxLayout()
                 
                 auto_fix_btn = QPushButton("🔧 Auto-Fix")
@@ -598,18 +611,38 @@ class ErrorFixWidget(QWidget):
                 manual_btn.clicked.connect(self.show_manual_commands)
                 button_layout.addWidget(manual_btn)
                 
+                # Add retry button
+                retry_btn = QPushButton("🔄 Retry Operation")
+                retry_btn.setStyleSheet("background-color: #FF8C00; color: white; font-weight: bold;")
+                retry_btn.clicked.connect(self.retry_operation)
+                button_layout.addWidget(retry_btn)
+                
                 button_layout.addStretch()
                 layout.addLayout(button_layout)
             else:
                 no_fix_label = QLabel("⚠️ Manual intervention required")
                 no_fix_label.setStyleSheet("color: #FF6347; font-weight: bold;")
                 layout.addWidget(no_fix_label)
+                
+                # Still add retry button for manual fixes
+                button_layout = QHBoxLayout()
+                retry_btn = QPushButton("🔄 Retry After Manual Fix")
+                retry_btn.setStyleSheet("background-color: #FF8C00; color: white; font-weight: bold;")
+                retry_btn.clicked.connect(self.retry_operation)
+                button_layout.addWidget(retry_btn)
+                button_layout.addStretch()
+                layout.addLayout(button_layout)
         
         # Separator
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
         separator.setStyleSheet("color: #D3D3D3;")
         layout.addWidget(separator)
+    
+    def retry_operation(self):
+        """Request retry of the operation for this repository"""
+        repo_path = str(self.error_info['repo_path'])
+        self.retry_requested.emit(repo_path)
     
     def perform_auto_fix(self):
         """Attempt to automatically fix the repository issue"""
@@ -638,18 +671,21 @@ class ErrorFixWidget(QWidget):
                     QMessageBox.information(
                         self,
                         "Auto-Fix Successful",
-                        f"✅ {fix_result['message']}\n\nOutput:\n" + "\n".join(fix_result['output'])
+                        f"✅ {fix_result['message']}\n\nOutput:\n" + "\n".join(fix_result['output'][:10])
                     )
                     # Update button to show success
                     sender = self.sender()
                     sender.setText("✅ Fixed")
                     sender.setEnabled(False)
                     sender.setStyleSheet("background-color: #228B22; color: white;")
+                    
+                    # Auto-retry the operation
+                    self.retry_operation()
                 else:
                     QMessageBox.warning(
                         self,
                         "Auto-Fix Failed",
-                        f"❌ {fix_result['message']}\n\nOutput:\n" + "\n".join(fix_result['output'])
+                        f"❌ {fix_result['message']}\n\nOutput:\n" + "\n".join(fix_result['output'][:10])
                     )
             except Exception as e:
                 QMessageBox.critical(
@@ -820,6 +856,11 @@ class GitRepoManager(QMainWindow):
         health_check_btn.clicked.connect(self.run_health_check)
         health_check_btn.setStyleSheet("background-color: #20B2AA; color: white;")
         error_buttons.addWidget(health_check_btn)
+        
+        retry_failed_btn = QPushButton("🔄 Retry All Failed")
+        retry_failed_btn.clicked.connect(self.retry_failed_repositories)
+        retry_failed_btn.setStyleSheet("background-color: #FF8C00; color: white; font-weight: bold;")
+        error_buttons.addWidget(retry_failed_btn)
         
         error_buttons.addStretch()
         error_layout.addLayout(error_buttons)
@@ -1089,8 +1130,11 @@ class GitRepoManager(QMainWindow):
         scrollbar.setValue(scrollbar.maximum())
         
         # Add smart fix widget if fix is available
-        if error_info['analysis']['fix_available']:
+        if error_info['analysis']['fix_available'] or error_info['analysis']['type'] != 'unknown':
             fix_widget = ErrorFixWidget(error_info)
+            
+            # Connect retry signal
+            fix_widget.retry_requested.connect(self.retry_single_repository)
             
             # Remove the stretch item temporarily
             self.fix_layout.removeItem(self.fix_layout.itemAt(self.fix_layout.count() - 1))
@@ -1103,7 +1147,89 @@ class GitRepoManager(QMainWindow):
             self.fix_layout.addStretch()
             
             # Scroll to show new widget
+            # Scroll to show new widget
             self.fix_scroll_area.ensureWidgetVisible(fix_widget)
+    
+    def retry_failed_repositories(self):
+        """Retry operation on all repositories that had errors"""
+        if not self.error_widgets:
+            QMessageBox.information(self, "No Failed Repositories", "No repositories with errors to retry.")
+            return
+        
+        # Extract repository paths from error widgets
+        failed_repos = []
+        for widget in self.error_widgets:
+            repo_path = widget.error_info['repo_path']
+            if repo_path not in failed_repos:
+                failed_repos.append(repo_path)
+        
+        if not failed_repos:
+            QMessageBox.information(self, "No Failed Repositories", "No repositories with errors to retry.")
+            return
+        
+        # Ask for confirmation
+        repo_names = [repo.name for repo in failed_repos]
+        reply = QMessageBox.question(
+            self,
+            "Retry Failed Repositories",
+            f"Retry operation on {len(failed_repos)} failed repositories?\n\n"
+            f"Repositories: {', '.join(repo_names[:5])}{'...' if len(repo_names) > 5 else ''}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # Clear existing errors
+            self.clear_error_area()
+            
+            # Determine operation (default to push, could be made smarter)
+            operation = 'push'
+            
+            # Start retry operation
+            self.pull_button.setEnabled(False)
+            self.push_button.setEnabled(False)
+            self.refresh_button.setEnabled(False)
+            
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 0)
+            self.status_label.setText(f"Retrying {operation} on {len(failed_repos)} repositories...")
+            self.status_label.setStyleSheet("color: #FF8C00; font-weight: bold;")
+            
+            # Create worker for failed repositories
+            self.worker = GitWorker(failed_repos, operation)
+            self.worker.progress.connect(self.update_progress)
+            self.worker.success_output.connect(self.add_success_message)
+            self.worker.error_output.connect(self.add_error_with_fix)
+            self.worker.finished.connect(self.operation_finished)
+            self.worker.start()
+    
+    def retry_single_repository(self, repo_path_str: str):
+        """Retry operation on a single repository"""
+        repo_path = Path(repo_path_str)
+        
+        if repo_path not in self.repositories:
+            QMessageBox.warning(self, "Repository Not Found", f"Repository {repo_path} not found in current list.")
+            return
+        
+        # Determine last operation (could be enhanced to track this)
+        operation = 'push'  # Default to push, could be made smarter
+        
+        # Create worker for single repository
+        self.pull_button.setEnabled(False)
+        self.push_button.setEnabled(False)
+        self.refresh_button.setEnabled(False)
+        
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self.status_label.setText(f"Retrying operation on {repo_path.name}...")
+        self.status_label.setStyleSheet("color: #FF8C00; font-weight: bold;")
+        
+        # Create worker for single repository
+        self.worker = GitWorker([repo_path], operation)
+        self.worker.progress.connect(self.update_progress)
+        self.worker.success_output.connect(self.add_success_message)
+        self.worker.error_output.connect(self.add_error_with_fix)
+        self.worker.finished.connect(self.operation_finished)
+        self.worker.start()
     
     def clear_error_area(self):
         """Clear all error messages and fix widgets"""
@@ -1126,8 +1252,8 @@ class GitRepoManager(QMainWindow):
             self.show_error("No repositories found. Please scan for repositories first.")
             return
         
-#        self.status_label.setText("Running health checks...")
-#        self.status_label.setStyleSheet("color: #20B2AA; font-weight: bold;")
+        self.status_label.setText("Running health checks...")
+        self.status_label.setStyleSheet("color: #20B2AA; font-weight: bold;")
         
         health_report = []
         issues_found = 0
