@@ -1,0 +1,10 @@
+Rewrite rps2.py in the same directory with the following:
+1. Use PyQt6
+2. It copies a clipboard to remove the prepended spaces and copies it back.
+3. It has two windows/texts to show the difference between the two.
+4. It has a button "process" that processes the input from the right button and shows the results in the right text.
+5. It automatically copies back the content, but it also allows users copy from the right text.
+6. Before it starts the work, it checks if it has the prepended spaces. If not, show message that it doesn't have to do the work.
+7. After the work, it compares the input and output check if it really removes the prepended spaces.
+
+The check should start from the line 1. If the line 1 has N spaces, remove N spaces all the following lines. If the line doesn't have N spaces, remove spaces as much as possible. Rewrite.
