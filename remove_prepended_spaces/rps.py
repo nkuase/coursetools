@@ -259,12 +259,12 @@ class RemovePrependedSpacesApp(QMainWindow):
             lines_count = len(processed_text.split('\n'))
             self.statusBar().showMessage(f"✅ {message} | {lines_count} lines processed & auto-copied!")
             
-            QMessageBox.information(
-                self, 
-                "Success", 
-                f"{message}\n\nResult has been automatically copied to clipboard!\n"
-                f"You can now paste it anywhere."
-            )
+            #QMessageBox.information(
+            #    self, 
+            #    "Success", 
+            #    f"{message}\n\nResult has been automatically copied to clipboard!\n"
+            #    f"You can now paste it anywhere."
+            #)
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Processing failed:\n{str(e)}")
