@@ -268,10 +268,10 @@ class MarpToHtmlConverter(QMainWindow):
         
         # Generate HTML output with configurable percentages
         html_parts = []
-        html_parts.append('<div style="display: flex; gap: 0em; align-items: flex-start;">')
+        html_parts.append('<div style="display: flex; gap: 0.5em; align-items: stretch;">')
         
         # Left side - List items (configurable percentage)
-        html_parts.append(f'    <div style="flex: 0 0 {self.left_percentage}%;">')
+        html_parts.append(f'    <div style="flex: 0 0 {self.left_percentage}%;font-size: 1em;">')
         if list_items:
             html_parts.append('    <ul>')
             for item in list_items:
@@ -280,7 +280,7 @@ class MarpToHtmlConverter(QMainWindow):
         html_parts.append('  </div>')
         
         # Right side - Image (complementary percentage)
-        html_parts.append(f'  <div style="flex: 0 0 {right_percentage}%;">')
+        html_parts.append(f'  <div style="flex: 0 0 {right_percentage}%;display: flex;justify-content: center; align-items: center;">')
         if image_info:
             html_parts.append(f'    <img src="{image_info["src"]}" alt="{image_info["alt"]}" style="max-width: 100%;">')
         html_parts.append('  </div>')
